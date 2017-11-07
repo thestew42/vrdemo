@@ -61,6 +61,13 @@ private:
     VkDevice device = nullptr;
     VkQueue gfx_queue = nullptr;
     VkQueue present_queue = nullptr;
+
+    VkFormat sc_format;
+    VkColorSpaceKHR sc_color_space;
+    uint32_t sc_image_count = 0;
+    VkExtent2D sc_extent;
+    VkImage* sc_images = nullptr;
+    VkImageView* sc_image_views = nullptr;
     VkSwapchainKHR swapchain = nullptr;
 
     bool sc_is_srgb = false;
@@ -321,9 +328,8 @@ private:
         else
             min_images = MIN(surface_caps.minImageCount + 1, surface_caps.maxImageCount);
 
-        VkExtent2D extent;
-        extent.width = MAX(surface_caps.minImageExtent.width, MIN(surface_caps.maxImageExtent.width, WIDTH));
-        extent.height = MAX(surface_caps.minImageExtent.height, MIN(surface_caps.maxImageExtent.height, HEIGHT));
+        sc_extent.width = MAX(surface_caps.minImageExtent.width, MIN(surface_caps.maxImageExtent.width, WIDTH));
+        sc_extent.height = MAX(surface_caps.minImageExtent.height, MIN(surface_caps.maxImageExtent.height, HEIGHT));
 
         // Query surface for supported formats
         uint32_t format_count;
@@ -332,8 +338,8 @@ private:
         vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, win_surface, &format_count, available_formats.data());
 
         // Choose image format for presentation, default is first
-        VkFormat sc_format = available_formats[0].format;
-        VkColorSpaceKHR sc_color_space = available_formats[0].colorSpace;
+        sc_format = available_formats[0].format;
+        sc_color_space = available_formats[0].colorSpace;
         for (const auto& format : available_formats) {
             // try to choose an sRGB format
             if (format.format == VK_FORMAT_R8G8B8A8_SRGB ||
@@ -368,7 +374,7 @@ private:
         swapchain_ci.minImageCount = min_images;
         swapchain_ci.imageFormat = sc_format;
         swapchain_ci.imageColorSpace = sc_color_space;
-        swapchain_ci.imageExtent = extent;
+        swapchain_ci.imageExtent = sc_extent;
         swapchain_ci.imageArrayLayers = 1;
         swapchain_ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         swapchain_ci.preTransform = surface_caps.currentTransform;
@@ -397,7 +403,40 @@ private:
             throw std::runtime_error("Failed to create swapchain");
         }
 
+        // Get the array of swapchain images
+        vkGetSwapchainImagesKHR(device, swapchain, &sc_image_count, nullptr);
+        sc_images = new VkImage[sc_image_count];
+        vkGetSwapchainImagesKHR(device, swapchain, &sc_image_count, sc_images);
+
         std::cout << "Swapchain created" << std::endl;
+        std::cout << "\tImage count: " << sc_image_count << std::endl;
+        std::cout << "\tExtent: " << sc_extent.width << " x " << sc_extent.height << std::endl;
+        std::cout << "\tFormat: " << sc_format << std::endl;
+        std::cout << "\tColor space: " << sc_color_space << std::endl;
+
+        // Create views for each swapchain image
+        sc_image_views = new VkImageView[sc_image_count];
+        for (unsigned int i = 0; i < sc_image_count; i++) {
+            VkImageViewCreateInfo image_view_ci = {};
+            image_view_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            image_view_ci.flags = 0;
+            image_view_ci.image = sc_images[i];
+            image_view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            image_view_ci.format = sc_format;
+            image_view_ci.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+            image_view_ci.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+            image_view_ci.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+            image_view_ci.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+            image_view_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            image_view_ci.subresourceRange.baseMipLevel = 0;
+            image_view_ci.subresourceRange.levelCount = 1;
+            image_view_ci.subresourceRange.baseArrayLayer = 0;
+            image_view_ci.subresourceRange.layerCount = 1;
+
+            if (vkCreateImageView(device, &image_view_ci, nullptr, &(sc_image_views[i])) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create image view for swapchain image");
+            }
+        }
     }
 
     void mainLoop() {
@@ -407,6 +446,12 @@ private:
     }
 
     void cleanup() {
+        for (unsigned int i = 0; i < sc_image_count; i++) {
+            vkDestroyImageView(device, sc_image_views[i], nullptr);
+        }
+
+        delete[] sc_image_views;
+        delete[] sc_images;
         vkDestroySwapchainKHR(device, swapchain, nullptr);
         vkDestroyDevice(device, nullptr);
 
