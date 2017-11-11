@@ -71,17 +71,31 @@ private:
     VkImage* sc_images = nullptr;
     VkImageView* sc_image_views = nullptr;
     VkSwapchainKHR swapchain = nullptr;
+    VkSemaphore* image_ready_semaphores = nullptr;
+    VkSemaphore* frame_done_semaphores = nullptr;
+    VkFence* cmd_buffer_fences = nullptr;
+    uint32_t sem_index = 0;
 
     VkFormat ds_format;
     VkImage ds_buffer;
+    VkImageView ds_buffer_view;
     VkDeviceMemory ds_buffer_mem;
+
+    VkFramebuffer* framebuffers;
 
     VkShaderModule vert_shader;
     VkShaderModule frag_shader;
+    VkBuffer vertex_buffer;
+    VkDeviceMemory vertex_buffer_mem;
 
     VkRenderPass render_pass;
     VkPipelineLayout pipeline_layout;
     VkPipeline pipeline;
+
+    VkCommandPool command_pool;
+    VkCommandBuffer* command_buffers;
+
+    VkAllocationCallbacks* p_allocs = nullptr;
 
     bool sc_is_srgb = false;
 
@@ -111,8 +125,14 @@ private:
         createDeviceAndQueues();
         createSwapchain();
         createDepthBuffer();
+
         createRenderPass();
         createPipeline();
+        createFramebuffer();
+        createVertexBuffer();
+
+        createCommandPool();
+        createCommandBuffer();
     }
 
     void createInstance() {
@@ -185,13 +205,13 @@ private:
         }
 
         // Create vulkan instance
-        if (vkCreateInstance(&inst_ci, nullptr, &instance) != VK_SUCCESS) {
+        if (vkCreateInstance(&inst_ci, p_allocs, &instance) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create Vulkan instance");
         }
     }
 
     void createSurface() {
-        if (glfwCreateWindowSurface(instance, window, nullptr, &win_surface) != VK_SUCCESS) {
+        if (glfwCreateWindowSurface(instance, window, p_allocs, &win_surface) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create window surface");
         }
     }
@@ -325,7 +345,7 @@ private:
         device_ci.ppEnabledExtensionNames = dev_extensions.data();
         device_ci.pEnabledFeatures = &dev_features;
 
-        if (vkCreateDevice(physical_device, &device_ci, nullptr, &device) != VK_SUCCESS) {
+        if (vkCreateDevice(physical_device, &device_ci, p_allocs, &device) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create logical device");
         }
 
@@ -418,7 +438,7 @@ private:
         }
 
         // Create the swapchain
-        if (vkCreateSwapchainKHR(device, &swapchain_ci, nullptr, &swapchain) != VK_SUCCESS) {
+        if (vkCreateSwapchainKHR(device, &swapchain_ci, p_allocs, &swapchain) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create swapchain");
         }
 
@@ -452,8 +472,32 @@ private:
             image_view_ci.subresourceRange.baseArrayLayer = 0;
             image_view_ci.subresourceRange.layerCount = 1;
 
-            if (vkCreateImageView(device, &image_view_ci, nullptr, &(sc_image_views[i])) != VK_SUCCESS) {
+            if (vkCreateImageView(device, &image_view_ci, p_allocs, &(sc_image_views[i])) != VK_SUCCESS) {
                 throw std::runtime_error("Failed to create image view for swapchain image");
+            }
+        }
+
+        // Create semaphores and fences used for swapchain/application synchronization
+        VkSemaphoreCreateInfo semaphore_ci = {};
+        semaphore_ci.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        semaphore_ci.flags = 0;
+
+        VkFenceCreateInfo fence_ci = {};
+        fence_ci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fence_ci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+        image_ready_semaphores = new VkSemaphore[sc_image_count];
+        frame_done_semaphores = new VkSemaphore[sc_image_count];
+        cmd_buffer_fences = new VkFence[sc_image_count];
+        for (uint32_t i = 0; i < sc_image_count; i++) {
+            if (vkCreateSemaphore(device, &semaphore_ci, p_allocs, &(image_ready_semaphores[i])) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create sephamore");
+            }
+            if (vkCreateSemaphore(device, &semaphore_ci, p_allocs, &(frame_done_semaphores[i])) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create sephamore");
+            }
+            if (vkCreateFence(device, &fence_ci, p_allocs, &(cmd_buffer_fences[i])) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create fence");
             }
         }
     }
@@ -498,7 +542,7 @@ private:
         image_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         image_ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-        if (vkCreateImage(device, &image_ci, nullptr, &ds_buffer) != VK_SUCCESS) {
+        if (vkCreateImage(device, &image_ci, p_allocs, &ds_buffer) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create depth/stencil buffer image");
         }
 
@@ -511,12 +555,33 @@ private:
         alloc_info.allocationSize = mem_req.size;
         alloc_info.memoryTypeIndex = findMemType(mem_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         
-        if (vkAllocateMemory(device, &alloc_info, nullptr, &ds_buffer_mem) != VK_SUCCESS) {
+        if (vkAllocateMemory(device, &alloc_info, p_allocs, &ds_buffer_mem) != VK_SUCCESS) {
             throw std::runtime_error("Failed to allocate device memory for depth/stencil buffer");
         }
 
         if (vkBindImageMemory(device, ds_buffer, ds_buffer_mem, 0) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to bind memory to depth buffer");
+            throw std::runtime_error("Failed to bind memory to depth/stencil buffer");
+        }
+
+        // Create depth stencil buffer view
+        VkImageViewCreateInfo ds_view_ci = {};
+        ds_view_ci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        ds_view_ci.flags = 0;
+        ds_view_ci.image = ds_buffer;
+        ds_view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ds_view_ci.format = ds_format;
+        ds_view_ci.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ds_view_ci.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ds_view_ci.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ds_view_ci.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+        ds_view_ci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+        ds_view_ci.subresourceRange.baseMipLevel = 0;
+        ds_view_ci.subresourceRange.levelCount = 1;
+        ds_view_ci.subresourceRange.baseArrayLayer = 0;
+        ds_view_ci.subresourceRange.layerCount = 1;
+
+        if (vkCreateImageView(device, &ds_view_ci, p_allocs, &ds_buffer_view) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create view for depth/stencil buffer");
         }
     }
 
@@ -564,6 +629,16 @@ private:
         subpass.preserveAttachmentCount = 0;
         subpass.pResolveAttachments = nullptr;
 
+        // Override implicit dependency on swapchain image
+        VkSubpassDependency dependency = {};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependency.dependencyFlags = 0;
+
         // Render pass specification
         VkRenderPassCreateInfo render_pass_ci = {};
         render_pass_ci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -572,10 +647,10 @@ private:
         render_pass_ci.pAttachments = attachments;
         render_pass_ci.subpassCount = 1;
         render_pass_ci.pSubpasses = &subpass;
-        render_pass_ci.dependencyCount = 0;
-        render_pass_ci.pDependencies = nullptr;
+        render_pass_ci.dependencyCount = 1;
+        render_pass_ci.pDependencies = &dependency;
 
-        if (vkCreateRenderPass(device, &render_pass_ci, nullptr, &render_pass) != VK_SUCCESS) {
+        if (vkCreateRenderPass(device, &render_pass_ci, p_allocs, &render_pass) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create render pass");
         }
     }
@@ -590,7 +665,7 @@ private:
         playout_ci.pushConstantRangeCount = 0;
         playout_ci.pPushConstantRanges = nullptr;
 
-        if (vkCreatePipelineLayout(device, &playout_ci, nullptr, &pipeline_layout) != VK_SUCCESS) {
+        if (vkCreatePipelineLayout(device, &playout_ci, p_allocs, &pipeline_layout) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create pipeline layout");
         }
 
@@ -614,20 +689,17 @@ private:
         stages_ci[1].pSpecializationInfo = nullptr;
 
         // Vertex input state: vertex buffer contains position and color data
-        VkVertexInputBindingDescription vi_bindings[2] = {};
-        vi_bindings[0].binding = 0;
-        vi_bindings[0].stride = 24;
-        vi_bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-        vi_bindings[1].binding = 1;
-        vi_bindings[1].stride = 24;
-        vi_bindings[1].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        VkVertexInputBindingDescription vi_binding = {};
+        vi_binding.binding = 0;
+        vi_binding.stride = 24;
+        vi_binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
         VkVertexInputAttributeDescription vi_attributes[2] = {};
         vi_attributes[0].binding = 0;
         vi_attributes[0].location = 0;
         vi_attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
         vi_attributes[0].offset = 0;
-        vi_attributes[1].binding = 1;
+        vi_attributes[1].binding = 0;
         vi_attributes[1].location = 1;
         vi_attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
         vi_attributes[1].offset = 12;
@@ -635,8 +707,8 @@ private:
         VkPipelineVertexInputStateCreateInfo vi_state_ci = {};
         vi_state_ci.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         vi_state_ci.flags = 0;
-        vi_state_ci.vertexBindingDescriptionCount = 2;
-        vi_state_ci.pVertexBindingDescriptions = vi_bindings;
+        vi_state_ci.vertexBindingDescriptionCount = 1;
+        vi_state_ci.pVertexBindingDescriptions = &vi_binding;
         vi_state_ci.vertexAttributeDescriptionCount = 2;
         vi_state_ci.pVertexAttributeDescriptions = vi_attributes;
 
@@ -754,43 +826,270 @@ private:
         pipeline_ci.basePipelineIndex = 0;
         
         // TODO: pipeline cache
-        if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipeline_ci, nullptr, &pipeline) != VK_SUCCESS) {
+        if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipeline_ci, p_allocs, &pipeline) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create graphics pipeline.");
+        }
+    }
+
+    void createFramebuffer() {
+        VkImageView attachments[2];
+        attachments[1] = ds_buffer_view;
+
+        framebuffers = new VkFramebuffer[sc_image_count];
+        VkFramebufferCreateInfo framebuffer_ci = {};
+        for (uint32_t i = 0; i < sc_image_count; i++) {
+            attachments[0] = sc_image_views[i];
+            
+            framebuffer_ci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebuffer_ci.flags = 0;
+            framebuffer_ci.renderPass = render_pass;
+            framebuffer_ci.attachmentCount = 2;
+            framebuffer_ci.pAttachments = attachments;
+            framebuffer_ci.width = sc_extent.width;
+            framebuffer_ci.height = sc_extent.height;
+            framebuffer_ci.layers = 1;
+
+            if (vkCreateFramebuffer(device, &framebuffer_ci, p_allocs, &(framebuffers[i])) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create framebuffer");
+            }
+        }
+    }
+
+    void createVertexBuffer() {
+        // Create vertex buffer object
+        VkBufferCreateInfo buffer_ci = {};
+        buffer_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_ci.flags = 0;
+        buffer_ci.size = 36;
+        buffer_ci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        buffer_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        if (vkCreateBuffer(device, &buffer_ci, p_allocs, &vertex_buffer) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create vertex buffer");
+        }
+
+        // Allocate memory and bind to vertex buffer
+        VkMemoryRequirements mem_req;
+        vkGetBufferMemoryRequirements(device, vertex_buffer, &mem_req);
+
+        VkMemoryAllocateInfo alloc_info = {};
+        alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc_info.allocationSize = mem_req.size;
+        alloc_info.memoryTypeIndex = findMemType(mem_req.memoryTypeBits, 
+            static_cast<VkMemoryPropertyFlagBits>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+
+        if (vkAllocateMemory(device, &alloc_info, p_allocs, &vertex_buffer_mem) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate device memory for vertex buffer");
+        }
+
+        if (vkBindBufferMemory(device, vertex_buffer, vertex_buffer_mem, 0) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to bind memory to vertex buffer");
+        }
+
+        // Copy vertex data to vertex buffer
+        float vertex_data[] = {
+            0.0f, -0.5f, 0.5f,
+            1.0f, 0.0f, 0.0f,
+            0.5f, 0.5f, 0.5f,
+            0.0f, 1.0f, 0.0f,
+            -0.5f, 0.5f, 0.5f,
+            0.0f, 0.0f, 1.0f
+        };
+        void* mapped_data;
+        if (vkMapMemory(device, vertex_buffer_mem, 0, mem_req.size, 0, &mapped_data) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to map vertex buffer memory to host");
+        }
+        memcpy(mapped_data, vertex_data, mem_req.size);
+        vkUnmapMemory(device, vertex_buffer_mem);
+
+        std::cout << "Finished creating vertex buffer" << std::endl;
+    }
+
+    void createCommandPool() {
+        VkCommandPoolCreateInfo pool_ci = {};
+        pool_ci.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_ci.flags = 0;
+        pool_ci.queueFamilyIndex = static_cast<uint32_t>(gfx_queue_family);
+
+        if (vkCreateCommandPool(device, &pool_ci, p_allocs, &command_pool) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create command pool");
+        }
+
+        std::cout << "Created command pool" << std::endl;
+    }
+
+    void createCommandBuffer() {
+        command_buffers = new VkCommandBuffer[sc_image_count];
+
+        // Allocate the command buffer from the pool
+        VkCommandBufferAllocateInfo buffer_ai = {};
+        buffer_ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        buffer_ai.commandPool = command_pool;
+        buffer_ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        buffer_ai.commandBufferCount = sc_image_count;
+
+        if (vkAllocateCommandBuffers(device, &buffer_ai, command_buffers) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate command buffer");
+        }
+
+        VkClearColorValue clear_color = { 0.0f, 0.0f, 0.0f, 1.0f };
+        VkClearValue clear_values[2];
+        clear_values[0].color = clear_color;
+        clear_values[1].depthStencil.depth = 1.0f;
+
+        VkDeviceSize vtx_buffer_offset = 0;
+
+        for (uint32_t i = 0; i < sc_image_count; i++) {
+            // Begin recording command buffer
+            VkCommandBufferBeginInfo begin_info = {};
+            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin_info.flags = 0;
+            begin_info.pInheritanceInfo = nullptr;
+
+            if (vkBeginCommandBuffer(command_buffers[i], &begin_info) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to begin command buffer recording");
+            }
+
+            // Record the render pass and draw triangle
+            VkRenderPassBeginInfo rp_begin_info = {};
+            rp_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rp_begin_info.renderPass = render_pass;
+            rp_begin_info.framebuffer = framebuffers[i];
+            rp_begin_info.renderArea.offset = { 0, 0 };
+            rp_begin_info.renderArea.extent = sc_extent;
+            rp_begin_info.clearValueCount = 2;
+            rp_begin_info.pClearValues = clear_values;
+
+            vkCmdBeginRenderPass(command_buffers[i], &rp_begin_info, VK_SUBPASS_CONTENTS_INLINE);
+
+            vkCmdBindPipeline(command_buffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            vkCmdBindVertexBuffers(command_buffers[i], 0, 1, &vertex_buffer, &vtx_buffer_offset);
+            vkCmdDraw(command_buffers[i], 3, 1, 0, 0);
+
+            vkCmdEndRenderPass(command_buffers[i]);
+
+            // Finish recording command buffer
+            if (vkEndCommandBuffer(command_buffers[i]) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to end command buffer recording");
+            }
+        }
+    }
+
+    void drawFrame() {
+        // Get image from swapchain to use in framebuffer
+        uint32_t sc_index;
+        VkResult sc_result = vkAcquireNextImageKHR(device, swapchain, 0, image_ready_semaphores[sem_index], VK_NULL_HANDLE, &sc_index);
+        if (sc_result == VK_NOT_READY) {
+            // Image not ready, exit early
+            return;
+        }
+        else if (sc_result != VK_SUCCESS) {
+            throw std::runtime_error("Failed to acquire next image from swapchain");
+        }
+
+        // Wait for last submission of the command buffer to complete
+        VkResult fence_result = vkWaitForFences(device, 1, &(cmd_buffer_fences[sc_index]), VK_TRUE, 1000000);
+        if (fence_result == VK_TIMEOUT) {
+            // Can't re-sumbit command buffer yet
+            return;
+        }
+        else if (fence_result != VK_SUCCESS) {
+            throw std::runtime_error("Failed to wait for command buffer fence");
+        }
+        if (vkResetFences(device, 1, &(cmd_buffer_fences[sc_index])) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to reset command buffer fence");
+        }
+
+        // Submit render command buffer to queue
+        VkPipelineStageFlags wait_flags = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+        VkSubmitInfo submit_info = {};
+        submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.waitSemaphoreCount = 1;
+        submit_info.pWaitSemaphores = &(image_ready_semaphores[sem_index]);
+        submit_info.pWaitDstStageMask = &wait_flags;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &(command_buffers[sc_index]);
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = &(frame_done_semaphores[sem_index]);
+
+        if (vkQueueSubmit(gfx_queue, 1, &submit_info, cmd_buffer_fences[sc_index]) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to submit command buffer to queue");
+        }
+
+        // Present image back to swapchain
+        VkPresentInfoKHR present_info = {};
+        present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present_info.waitSemaphoreCount = 1;
+        present_info.pWaitSemaphores = &(frame_done_semaphores[sem_index]);
+        present_info.swapchainCount = 1;
+        present_info.pSwapchains = &swapchain;
+        present_info.pImageIndices = &sc_index;
+        present_info.pResults = nullptr;
+
+        if (vkQueuePresentKHR(present_queue, &present_info) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to present swapchain image");
+        }
+
+        // Cycle to next semaphore set
+        sem_index++;
+        if (sem_index == sc_image_count) {
+            sem_index = 0;
         }
     }
 
     void mainLoop() {
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
+            drawFrame();
         }
+
+        vkDeviceWaitIdle(device);
     }
 
     void cleanup() {
-        vkDestroyPipeline(device, pipeline, nullptr);
-        vkDestroyShaderModule(device, vert_shader, nullptr);
-        vkDestroyShaderModule(device, frag_shader, nullptr);
-        vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
-        vkDestroyRenderPass(device, render_pass, nullptr);
-        vkDestroyImage(device, ds_buffer, nullptr);
-        vkFreeMemory(device, ds_buffer_mem, nullptr);
+        vkDestroyCommandPool(device, command_pool, p_allocs);
+
+        vkDestroyBuffer(device, vertex_buffer, p_allocs);
+        vkFreeMemory(device, vertex_buffer_mem, p_allocs);
+
+        vkDestroyPipeline(device, pipeline, p_allocs);
+        vkDestroyShaderModule(device, vert_shader, p_allocs);
+        vkDestroyShaderModule(device, frag_shader, p_allocs);
+        vkDestroyPipelineLayout(device, pipeline_layout, p_allocs);
+
+        vkDestroyRenderPass(device, render_pass, p_allocs);
+        vkDestroyImageView(device, ds_buffer_view, p_allocs);
+        vkDestroyImage(device, ds_buffer, p_allocs);
+        vkFreeMemory(device, ds_buffer_mem, p_allocs);
 
         for (unsigned int i = 0; i < sc_image_count; i++) {
-            vkDestroyImageView(device, sc_image_views[i], nullptr);
+            vkDestroyImageView(device, sc_image_views[i], p_allocs);
+            vkDestroyFramebuffer(device, framebuffers[i], p_allocs);
+            vkDestroySemaphore(device, image_ready_semaphores[i], p_allocs);
+            vkDestroySemaphore(device, frame_done_semaphores[i], p_allocs);
+            vkDestroyFence(device, cmd_buffer_fences[i], p_allocs);
         }
 
-        delete[] sc_image_views;
-        delete[] sc_images;
-        vkDestroySwapchainKHR(device, swapchain, nullptr);
-        vkDestroyDevice(device, nullptr);
+        vkDestroySwapchainKHR(device, swapchain, p_allocs);
+        vkDestroyDevice(device, p_allocs);
 
         if (debug)
-            DestroyDebugReportCallbackEXT(instance, debug_callback, nullptr);
+            DestroyDebugReportCallbackEXT(instance, debug_callback, p_allocs);
 
-        vkDestroySurfaceKHR(instance, win_surface, nullptr);
-        vkDestroyInstance(instance, nullptr);
+        vkDestroySurfaceKHR(instance, win_surface, p_allocs);
+        vkDestroyInstance(instance, p_allocs);
 
         glfwDestroyWindow(window);
         glfwTerminate();
+
+        delete[] cmd_buffer_fences;
+        delete[] image_ready_semaphores;
+        delete[] frame_done_semaphores;
+        delete[] sc_image_views;
+        delete[] sc_images;
+        delete[] framebuffers;
+        delete[] command_buffers;
     }
 
     void enableDebugCallback() {
@@ -799,7 +1098,7 @@ private:
         debug_ci.flags = VK_DEBUG_REPORT_ERROR_BIT_EXT | VK_DEBUG_REPORT_WARNING_BIT_EXT;
         debug_ci.pfnCallback = debugCallback;
 
-        if (CreateDebugReportCallbackEXT(instance, &debug_ci, nullptr, &debug_callback) != VK_SUCCESS) {
+        if (CreateDebugReportCallbackEXT(instance, &debug_ci, p_allocs, &debug_callback) != VK_SUCCESS) {
             throw std::runtime_error("Failed to enable debug callback");
         }
     }
@@ -837,7 +1136,7 @@ private:
         shader_ci.pCode = reinterpret_cast<const uint32_t*>(code);
 
         VkShaderModule shader;
-        if (vkCreateShaderModule(device, &shader_ci, nullptr, &shader) != VK_SUCCESS) {
+        if (vkCreateShaderModule(device, &shader_ci, p_allocs, &shader) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create shader module");
         }
 
@@ -856,7 +1155,7 @@ private:
         const char* msg,
         void* userData) {
 
-        std::cerr << "Vulkan validation: " << msg << std::endl;
+        std::cerr << "[VULKAN VALIDATION]: " << msg << std::endl;
         return VK_FALSE;
     }
 };
@@ -869,6 +1168,7 @@ int main() {
     }
     catch (const std::runtime_error& e) {
         std::cerr << e.what() << std::endl;
+        getchar();
         return EXIT_FAILURE;
     }
 
