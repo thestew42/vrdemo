@@ -860,7 +860,7 @@ private:
         VkBufferCreateInfo buffer_ci = {};
         buffer_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         buffer_ci.flags = 0;
-        buffer_ci.size = 36;
+        buffer_ci.size = 36 * 3;
         buffer_ci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
         buffer_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -888,11 +888,25 @@ private:
 
         // Copy vertex data to vertex buffer
         float vertex_data[] = {
-            0.0f, -0.5f, 0.5f,
+            -0.6f, -0.3f, 0.5f,
             1.0f, 0.0f, 0.0f,
-            0.5f, 0.5f, 0.5f,
+            -0.3f, 0.3f, 0.5f,
             0.0f, 1.0f, 0.0f,
-            -0.5f, 0.5f, 0.5f,
+            -0.9f, 0.3f, 0.5f,
+            0.0f, 0.0f, 1.0f,
+
+            0.0f, -0.3f, 0.5f,
+            1.0f, 0.0f, 0.0f,
+            0.3f, 0.3f, 0.5f,
+            0.0f, 1.0f, 0.0f,
+            -0.3f, 0.3f, 0.5f,
+            0.0f, 0.0f, 1.0f,
+
+            0.6f, -0.3f, 0.5f,
+            1.0f, 0.0f, 0.0f,
+            0.9f, 0.3f, 0.5f,
+            0.0f, 1.0f, 0.0f,
+            0.3f, 0.3f, 0.5f,
             0.0f, 0.0f, 1.0f
         };
         void* mapped_data;
@@ -964,7 +978,7 @@ private:
 
             vkCmdBindPipeline(command_buffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             vkCmdBindVertexBuffers(command_buffers[i], 0, 1, &vertex_buffer, &vtx_buffer_offset);
-            vkCmdDraw(command_buffers[i], 3, 1, 0, 0);
+            vkCmdDraw(command_buffers[i], 9, 1, 0, 0);
 
             vkCmdEndRenderPass(command_buffers[i]);
 
