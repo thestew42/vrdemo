@@ -130,11 +130,20 @@ F:\VulkanSDK\1.0.65.0\Bin\glslangValidator.exe -V default.frag</Command>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="GraphicsDevice.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="PresentationEngine.cpp" />
+    <ClCompile Include="Renderer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="default.frag" />
     <None Include="default.vert" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Common.h" />
+    <ClInclude Include="GraphicsDevice.h" />
+    <ClInclude Include="PresentationEngine.h" />
+    <ClInclude Include="Renderer.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
